@@ -1,0 +1,1 @@
+/home/bmo/.xmonad/lib/XMonad/Layout/ResizableMultiColumns.hs
