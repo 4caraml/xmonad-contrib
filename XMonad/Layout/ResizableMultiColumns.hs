@@ -1,10 +1,10 @@
 {-# LANGUAGE ExistentialQuantification, FlexibleContexts, FlexibleInstances,
-             LambdaCase, MultiParamTypeClasses, NoMonomorphismRestriction,
-             RecordWildCards, TupleSections #-}
+             LambdaCase, MultiParamTypeClasses, MultiWayIf,
+             NoMonomorphismRestriction, RecordWildCards, TupleSections #-}
 
 module XMonad.Layout.ResizableMultiColumns
   ( ncolumns
-  , DMsg(..), ModNCol(..), DirMessage(..)
+  , DMsg(..), ModNCol(..)
   ) where
 
 import           Data.Functor
@@ -36,13 +36,9 @@ instance Message DMsg
 data ModNCol = ModNCol !Int deriving Typeable
 instance Message ModNCol
 
-data DirMessage =  DirMessage
-  { dir :: Direction2D
-  , msg :: SomeMessage
-  } deriving Typeable
-
-instance Message DirMessage
-
+data DResize = ExpandL | ExpandR | ShrinkL | ShrinkR
+  deriving Typeable
+instance Message DResize
 
 instance LayoutClass NColumns a where
   description NColumns{..} = "NColumns " ++ show (length nums)
@@ -68,36 +64,27 @@ instance LayoutClass NColumns a where
 
   handleMessage l@NColumns{..} m = fmap join . sequence $ msum
       [ resize <$> fromMessage m
-      , do dm <- fromMessage m; resize2D . (dir dm,) <$> fromMessage (msg dm)
+      , resizeCompat <$> fromMessage m
       , modNCol <$> fromMessage m
       , incMasterN <$> fromMessage m
       , debug <$> fromMessage m
       ]
     where
-      resize m = withFocusedColumn l $ \i -> Just $ case m of
-        Shrink
-          | 0 < i -> shrinkAt i l
-          | otherwise -> shrinkAt (i+1) l -- ie. at 1
+      resize = withFocusedColumn l . resize'
+
+      resizeCompat m = withFocusedColumn l $ \i -> case m of
         Expand
-          | i < length widths - 1 -> expandAt i l
-          | otherwise -> expandAt (i-1) l
+          | i == length widths - 1 -> resize' ShrinkL i
+          | otherwise -> resize' ExpandR i
+        Shrink
+          | i == 0 -> resize' ShrinkR i
+          | otherwise -> resize' ExpandL i
 
-      resize2D = \case
-        (d, Shrink) -> withFocusedColumn l $ \i -> case d of
-          R | i+1 < length widths -> Just $ expandAt (i+1) l
-            | otherwise -> Nothing
-          L | 0 <= i-1 -> Just $ expandAt (i-1) l
-            | otherwise -> Nothing
-          _ -> Nothing
-
-        --(d, Expand) -> withFocusedColumn l $ \i -> case d of
-        --  R | i+1 < length widths -> Just $ expandAt (i+1) l
-        --    | otherwise -> Nothing
-        --  L | 0 < i-1 -> Just $ expandAt (i-1) l
-        --    | otherwise -> Nothing
-        --  _ -> Nothing
-
-        _ -> pure Nothing
+      resize' m i = case m of
+        ExpandL -> adjustAt i (i-1) l
+        ExpandR -> adjustAt i (i+1) l
+        ShrinkL -> adjustAt (i-1) i l
+        ShrinkR -> adjustAt (i+1) i l
 
       modNCol (ModNCol n)
         | n < 0 = pure $ Just l {nums = consumeEnd n nums, widths = consumeEnd n widths}
@@ -111,11 +98,12 @@ instance LayoutClass NColumns a where
         i <- withFocusedColumn l Just
         Nothing <$ notify (show (l,i))
 
-shrinkAt, expandAt :: Int -> NColumns a -> NColumns a
-shrinkAt i l@NColumns{..} =
-  l {widths = modifyAt i (+delta) $ modifyAt (i-1) (subtract delta) widths}
-expandAt i l@NColumns{..} =
-  l {widths = modifyAt (i+1) (subtract delta) $ modifyAt i (+delta) widths}
+-- | increment at first and decrement at second index
+adjustAt :: Int -> Int -> NColumns a -> Maybe (NColumns a)
+adjustAt i j l@NColumns{..}
+  | 0 <= min i j, max i j < length widths = Just
+    l {widths = modifyAt i (+delta) $ modifyAt j (subtract delta) widths}
+  | otherwise = Nothing
 
 withFocusedColumn :: NColumns a -> (Int -> Maybe r) -> X (Maybe r)
 withFocusedColumn NColumns{..} x =
