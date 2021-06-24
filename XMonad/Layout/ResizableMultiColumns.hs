@@ -8,29 +8,38 @@
 module XMonad.Layout.ResizableMultiColumns
   ( IncColN(..)
   , ResizeAt(..)
-  , RMC(..), rmc
+  , rmc
   ) where
 
 import           Control.Monad
 import           Data.Ratio
+import           Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as M
 import           XMonad
 import           XMonad.Layout.ResizableTile (MirrorResize(..))
 import qualified XMonad.StackSet as W
 import           XMonad.Util.Types
 
-
-type Grid m n = [(m,[n])]
+type Grid = IntMap (Rational, IntMap Rational)
 
 data RMC a = RMC
   { cdef  :: !Rational
   , rdef  :: ![Rational]
   , delta :: !Rational
   , keep  :: !Int
-  , grid  :: !(Grid Rational Rational)
+  , grid  :: !Grid
   } deriving (Show, Read)
 
-rmc :: RMC a
-rmc = RMC 1 [1,1,1] (1%100) 3 [(1%2,[1]),(1,[3,1]),(1%4,[1])]
+toList :: Grid -> [(Rational, [Rational])]
+toList = map (fmap (map snd . M.toList). snd) . M.toList
+
+fromList :: [(Rational, [Rational])] -> Grid
+fromList = M.fromList
+  . zipWith (\k (c,rs) -> (k, (c, M.fromList $ zip [0..] rs))) [0..]
+
+rmc :: Rational -> [Rational] -> Rational -> Int -> [(Rational, [Rational])]
+    -> RMC a
+rmc c r d k = RMC c r d k . fromList
 
 data IncColN = IncColN !Int deriving Typeable
 instance Message IncColN
@@ -53,15 +62,20 @@ takes n (xs:xss)
   | otherwise = xs : takes (n-m) xss
   where m = length xs
 
-dropEnd :: Int -> [a] -> [a]
-dropEnd n xs = take (max 1 m) xs
-  where m = length xs - n
+dropEnd :: Int -> IntMap a -> IntMap a
+dropEnd 0 xs = xs
+dropEnd n xs
+  | M.size xs < 2 = xs
+  | otherwise = dropEnd (n-1) $ M.deleteMax xs
 
-modifyAt :: Int -> (a->a) -> [a] -> [a]
-modifyAt i f xs = as ++ map f bs ++ cs
+appendN :: Int -> a -> IntMap a -> IntMap a
+appendN n el xs = xs <> M.fromList ys
   where
-    (as, rs) = splitAt i xs
-    (bs, cs) = splitAt 1 rs
+    s  = M.size xs
+    ys = zip [s .. s + n - 1] (repeat el)
+
+modifyAt :: Int -> (a->a) -> IntMap a -> IntMap a
+modifyAt i f xs = M.adjust f i xs
 
 -- | pull the @n@th element to the front
 raiseFocused :: Int -> [a] -> [a]
@@ -74,15 +88,17 @@ getStack :: X (Maybe (W.Stack Window))
 getStack = gets (W.stack . W.workspace . W.current . windowset)
 
 coords :: RMC a -> Int -> (Int,Int)
-coords RMC{..} = go grid 0
+coords RMC{..} = go 0
   where
-    go ((_,xs):xss) i k
-      | k < m     = (i, k)
-      | otherwise = go xss (i+1) (k-m)
-      where m = length xs
-    go _ i n = (i + n `div` r, n `mod` r)
+    go i k = case grid M.!? i of
+      Just (_, xs) ->
+        let m = M.size xs in
+          if k < M.size xs then (i, k) else go (i+1) (k-m)
+      Nothing -> (i + k `div` r, k `mod` r)
 
     r = length rdef
+
+cols3 = rmc 1 [1,1,1] (1%100) 3 [(1%2,[1]),(1,[3,1]),(1%4,[1])]
 
 size :: W.Stack a -> Int
 size (W.Stack _ ls rs) = 1 + length ls + length rs
@@ -113,7 +129,7 @@ instance LayoutClass RMC a where
       pure (wrects, if grid' /= grid then Just l {grid = grid'} else Nothing)
     where
       c = numCols l s
-      infGrid = grid ++ repeat (cdef, rdef)
+      infGrid = toList grid ++ repeat (cdef, rdef)
       cweights = take c (fst <$> infGrid)
       crects = splitH cweights c r
 
@@ -125,13 +141,14 @@ instance LayoutClass RMC a where
       wrects = zip ws $ raiseFocused (length ls) (concat rectss)
 
       grid' | keep < 0  = grid
-            | otherwise = take (c + keep) grid
+            | otherwise = fromList $ take (c + keep) infGrid
 
   handleMessage l@RMC{..} m' = fmap join . withStack $ \s ->
       let
         ij@(i,_) = focusedCoords l s
         maxX = numCols l s
-        maxY = length $ takes (size s) (map snd grid ++ repeat rdef) !! i
+        maxY = length
+             $ takes (size s) (map snd (toList grid) ++ repeat rdef) !! i
       in msum
         [ resize ij =<< fromMessage m'
         , resizeG Expand L R fst maxX ij =<< fromMessage m'
@@ -170,10 +187,10 @@ instance LayoutClass RMC a where
 
       incColN (IncColN n)
         | n < 0 = Just l {grid = dropEnd (-n) grid}
-        | 0 < n = Just l {grid = grid ++ replicate n (cdef, rdef)}
+        | 0 < n = Just l {grid = appendN n (cdef, M.fromList (zip [0..] rdef)) grid}
         | otherwise = Nothing
 
       incMasterN i (IncMasterN n) =
         if | n < 0 -> Just l {grid = modifyAt i (dropEnd (-n) <$>) grid}
-           | 0 < n -> Just l {grid = modifyAt i ((++replicate n 1) <$>) grid}
+           | 0 < n -> Just l {grid = modifyAt i (appendN n 1 <$>) grid}
            | otherwise -> Nothing
